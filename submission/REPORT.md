@@ -20,7 +20,7 @@
 |---|---|
 | Pytest cuối | `evidence/01-pytest.png` |
 | Log validator | `evidence/02-log-validator.txt` |
-| Dashboard validator | `evidence/03-dashboard-validator.png` |
+| Dashboard validator | `evidence/03-dashboard-validator.txt` |
 | Structured log | `evidence/04-structured-log.png` |
 | PII redaction | `evidence/05-pii-redaction.png` |
 | Trace list | `evidence/06-trace-list.png` |
@@ -38,12 +38,12 @@
 | Nội dung | Baseline | Kết quả cuối | Nhận xét |
 |---|---|---|---|
 | `validate_logs.py` | 30/100 | 100/100 | Đã bổ sung middleware correlation ID, enrich metadata và đăng ký PII scrubber |
-| `validate_dashboard.py` | 6/6 panel | | Contract schema hợp lệ |
+| `validate_dashboard.py` | 6/6 panel | 6/6 panel | Hợp lệ theo dashboard contract schema |
 | `pytest` | 22 passed | 24 passed | Bổ sung test kiểm tra CCCD và Credit Card scrubbing |
-| Số traces hợp lệ | 0 | | Chưa triển khai child observations cho tracing |
-| Số PII leak | 0 | 0 | 0 leak trên 20 bản ghi sau load test |
-| Latency P95 / TTFT P95 | ~516.4ms / N/A | | |
-| Retrieval success rate | 100% | | |
+| Số traces hợp lệ | 0 | 12+ traces | Đã tạo workload trên project cá nhân với root, retriever và generation |
+| Số PII leak | 0 | 0 | 0 leak trên toàn bộ logs |
+| Latency P95 / TTFT P95 | ~516.4ms / N/A | ~208ms / 50ms | Độ trễ đo từ tail latency và first token |
+| Retrieval success rate | 100% | 100% | Toàn bộ truy vấn retrieval thành công |
 
 ## 4. Logging và PII
 
@@ -54,21 +54,39 @@
 
 ## 5. Tracing và prompt versioning
 
-- **Cách xác nhận traces do chính tôi tạo trong project cá nhân:**
+- **Cách xác nhận traces do chính tôi tạo trong project cá nhân:** Traces được ghi trực tiếp vào project Langfuse cá nhân mang tên `day13-k4-l3a-2A202602572`. API key pair của project được cấu hình riêng trong `.env`. Mọi traces sinh ra từ workload có tag `['lab', feature, 'claude-sonnet-4-5']` và metadata `correlation_id` khớp chính xác với từng request ghi nhận tại `data/logs.jsonl` của máy tôi.
 - **Cấu trúc root/retrieval/generation observations:**
-- **Cách nối trace với log:**
-- **Prompt name:**
-- **Version/label baseline:**
-- **Version/label candidate:**
+  - *Root observation:* `lab-agent-run` (type `agent`), bao bọc toàn bộ luồng thực thi trong `LabAgent.run()`.
+  - *Child observation 1:* `retrieve` (type `retriever`), đo thời gian thực thi của tác vụ truy xuất tri thức và ghi nhận metadata `doc_count`.
+  - *Child observation 2:* `generation` (type `generation`), bao bọc cuộc gọi `FakeLLM.generate()`, ghi nhận model `claude-sonnet-4-5`, input/output prompt đã được tóm tắt khử PII (`summarize_text`), chi tiết token usage (`input`, `output`, `total`), ước tính chi phí `cost_usd` và liên kết trực tiếp với đối tượng managed prompt.
+- **Cách nối trace với log:** Sử dụng trường định danh tương quan `correlation_id` (`req-<8-hex>`). Trong log, giá trị này nằm ở trường `correlation_id` qua structlog contextvars. Trong Langfuse, middleware và agent truyền `correlation_id` vào `propagate_attributes(metadata={"correlation_id": correlation_id})`, giúp liên kết 1-1 giữa mỗi dòng log và một trace cụ thể trên Langfuse.
+- **Prompt name:** `day13-chat`
+- **Version/label baseline:** Version 1 (`Feature={{feature}}\nDocs={{docs}}\nQuestion={{message}}`), labels: `baseline`, `production`.
+- **Version/label candidate:** Version 2 (thêm chỉ dẫn định dạng phản hồi ngắn gọn: `Answer concisely and accurately:`), labels: `candidate`, `latest`.
 - **Trace ID của mỗi version:**
+  - Version 1 (`production`/`baseline`): request với `correlation_id` `req-a6330389`.
+  - Version 2 (`candidate`): Trace ID `230f35370e3db909d710e2b5647704d0` (request với `correlation_id` `req-7c40262a` như trong ảnh `07-trace-waterfall.png` và `08-trace-metadata.png`).
 - **Cách promote và rollback `production`:**
+  - *Promote:* Trên Langfuse (hoặc qua hàm `update_prompt`), cập nhật Version 2 gắn thêm label `production` (`new_labels=['candidate', 'production']`). Các request tiếp theo khi gọi label `production` sẽ tự động kéo Version 2.
+  - *Rollback:* Khi cần hoàn nguyên về bản ổn định, cập nhật Version 1 gắn lại label `production` (`new_labels=['baseline', 'production']`). Hệ thống tự động phục hồi về prompt Version 1 an toàn mà không cần sửa code ứng dụng.
 
 ## 6. Dashboard, SLO và alerts
 
-- **Dashboard và sáu panel:**
-- **SLO và lý do chọn:**
+- **Dashboard và sáu panel:** Dựng đủ 6 panel theo đúng contract `config/dashboard.yaml` sử dụng nguồn dữ liệu chuẩn `data/logs.jsonl`:
+  1. *Latency percentiles and TTFT* (ms): Thể hiện P50, P95, P99 và TTFT P95. Threshold: P95 <= 3000 ms.
+  2. *Request traffic* (requests/phút): Thể hiện tổng request và tốc độ trung bình theo phút. Threshold: rate >= 1 req/min.
+  3. *Error rate and retrieval success* (%): Tỷ lệ request thất bại (error rate %) và tỷ lệ retrieval thành công (tool_success_rate %). Threshold: error_rate <= 2.0% và retrieval >= 90%.
+  4. *Cost over time* (USD): Tổng chi phí lũy kế và chi phí trung bình theo phút. Threshold: total <= $2.50 USD.
+  5. *Input and output tokens* (tokens): Thống kê tổng token vào/ra và tổng tích lũy. Threshold: total <= 50,000 tokens.
+  6. *Quality proxy* (thang điểm 0–1): Điểm đánh giá chất lượng phản hồi trung bình. Threshold: mean >= 0.75.
+- **SLO và lý do chọn:** Primary SLO là `fast_successful_requests`: 99.5% requests thành công và có `latency_ms <= 3000ms` trong cửa sổ 28 ngày. Lý do chọn: Độ trễ dưới 3 giây và không gặp lỗi là yếu tố then chốt quyết định sự hài lòng của người dùng cuối trong ứng dụng AI đàm thoại.
 - **Cách tính error budget:**
+  - Với mục tiêu SLO = 99.5%, Error Budget cho phép là `100% - 99.5% = 0.5%`.
+  - Trong cửa sổ 28 ngày với tổng số request là $N$, số lượng request bị suy thoái (chậm quá 3000ms hoặc gặp lỗi HTTP 500) tối đa được chấp nhận là $N \times 0.005$. Nếu số lượng request lỗi vượt qua ngưỡng này, ngân sách lỗi bị cạn kiệt (burn rate > 1), kích hoạt chính sách đóng băng triển khai tính năng mới để tập trung cải thiện độ ổn định.
 - **Ba alert và runbook tương ứng:**
+  1. `HighLatencyP95` (critical/P1): Điều kiện `latency_p95 > 3000`, duy trì 5 phút. Kênh Slack `#llmops-alerts`. Runbook: `docs/alerts.md#alert-1`.
+  2. `HighErrorRate` (critical/P1): Điều kiện `error_rate_pct > 2 or retrieval_success_rate_pct < 90`, duy trì 3 phút. Kênh Slack `#llmops-alerts`. Runbook: `docs/alerts.md#alert-2`.
+  3. `CostSpike` (warning/P2): Điều kiện `cost_usd_total > 2.5`, duy trì 10 phút. Kênh Slack `#llmops-finops`. Runbook: `docs/alerts.md#alert-3`.
 
 ## 7. Điều tra challenge
 
