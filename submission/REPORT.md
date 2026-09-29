@@ -19,7 +19,7 @@
 | Evidence | Đường dẫn |
 |---|---|
 | Pytest cuối | `evidence/01-pytest.png` |
-| Log validator | `evidence/02-log-validator.png` |
+| Log validator | `evidence/02-log-validator.txt` |
 | Dashboard validator | `evidence/03-dashboard-validator.png` |
 | Structured log | `evidence/04-structured-log.png` |
 | PII redaction | `evidence/05-pii-redaction.png` |
@@ -37,20 +37,20 @@
 
 | Nội dung | Baseline | Kết quả cuối | Nhận xét |
 |---|---|---|---|
-| `validate_logs.py` | 30/100 | | Thiếu required fields, correlation ID, metadata enrichment (đúng dự kiến baseline) |
+| `validate_logs.py` | 30/100 | 100/100 | Đã bổ sung middleware correlation ID, enrich metadata và đăng ký PII scrubber |
 | `validate_dashboard.py` | 6/6 panel | | Contract schema hợp lệ |
-| `pytest` | 22 passed | | Toàn bộ unit tests khởi đầu pass |
+| `pytest` | 22 passed | 24 passed | Bổ sung test kiểm tra CCCD và Credit Card scrubbing |
 | Số traces hợp lệ | 0 | | Chưa triển khai child observations cho tracing |
-| Số PII leak | 0 | | Chưa phát hiện leak ở baseline |
-| Latency P95 / TTFT P95 | ~516.4ms / N/A | | Chưa có trường ttft_ms và tail latency chuẩn |
-| Retrieval success rate | 100% | | Chưa có incident |
+| Số PII leak | 0 | 0 | 0 leak trên 20 bản ghi sau load test |
+| Latency P95 / TTFT P95 | ~516.4ms / N/A | | |
+| Retrieval success rate | 100% | | |
 
 ## 4. Logging và PII
 
-- **Cách tạo/nhận và truyền correlation ID:**
-- **Các metadata được ghi vào structured log:**
-- **Cách bảo đảm PII được scrub trước khi ghi:**
-- **Cách kiểm chứng kết quả:**
+- **Cách tạo/nhận và truyền correlation ID:** Trong `CorrelationIdMiddleware` (`app/middleware.py`), trước khi xử lý mỗi request, gọi `clear_contextvars()` để xóa context cũ tránh rò rỉ giữa các request. Trích xuất `x-request-id` từ request header nếu client truyền lên, nếu không có thì tự động sinh theo định dạng `req-<8-hex>` (`f"req-{uuid.uuid4().hex[:8]}"`). Sau đó gán vào `request.state.correlation_id` và bind vào structlog contextvars thông qua `bind_contextvars(correlation_id=correlation_id)`. Khi request hoàn tất, tính duration xử lý và trả về cả `x-request-id` lẫn `x-response-time-ms` trong response headers.
+- **Các metadata được ghi vào structured log:** Toàn bộ log API đều được làm giàu (enrich) tự động thông qua structlog contextvars: `correlation_id`, `ts` (ISO 8601 UTC), `level`, `service` ("api"), `event` ("request_received", "response_sent", "request_failed"), `user_id_hash` (băm SHA-256 lấy 12 ký tự hex đầu), `session_id`, `feature`, `model` ("claude-sonnet-4-5"), `env` ("dev"), cùng các chỉ số vận hành chi tiết: `latency_ms`, `ttft_ms`, `tokens_in`, `tokens_out`, `cost_usd`, `quality_score`, `tool_name`, `tool_success` và `payload`.
+- **Cách bảo đảm PII được scrub trước khi ghi:** Processor `scrub_event` trong `app/logging_config.py` được cấu hình nằm ngay trước `JsonlFileProcessor()` và `structlog.processors.JSONRenderer()`. Hàm `scrub_event` duyệt đệ quy qua mọi trường và cấu trúc dữ liệu con trong event log, gọi `scrub_text()` để thay thế toàn bộ email, số điện thoại Việt Nam (+84, 09x, dấu cách, gạch nối, chấm), CCCD (12 chữ số) và thẻ thanh toán (16 chữ số phân cách hoặc viết liền) bằng các token `[REDACTED_*]`. Vì việc thay thế diễn ra trước bước render và ghi file, tuyệt đối không có dữ liệu PII thô nào lọt vào `data/logs.jsonl` hoặc console output.
+- **Cách kiểm chứng kết quả:** Chạy `python scripts/validate_logs.py` đạt 100/100 điểm (0 bản ghi thiếu trường bắt buộc, 0 bản ghi thiếu context enrichment, 10/10 correlation ID phân biệt, 0 PII leak); chạy `python -m pytest -q` đạt 24/24 passed bao gồm các bộ test PII trong `tests/test_pii.py` và `tests/test_validate_logs.py`. Đồng thời kiểm tra trực tiếp file `data/logs.jsonl` thấy rõ các token `[REDACTED_EMAIL]`, `[REDACTED_PHONE_VN]`, `[REDACTED_CREDIT_CARD]`.
 
 ## 5. Tracing và prompt versioning
 
