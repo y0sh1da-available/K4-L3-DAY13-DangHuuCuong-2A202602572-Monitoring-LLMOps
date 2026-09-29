@@ -9,7 +9,7 @@
 - **Lớp:** K4-L3A
 - **Repository URL:** https://github.com/y0sh1da-available/K4-L3-DAY13-DangHuuCuong-2A202602572-Monitoring-LLMOps.git
 - **Commit SHA cuối:**
-- **Challenge ID:**
+- **Challenge ID:** day13-k4-l3a-monitoring-llmops-v1
 - **Tên project Langfuse cá nhân:** `day13-k4-l3a-2A202602572`
 
 ## 2. Evidence index
@@ -90,24 +90,34 @@
 
 ## 7. Điều tra challenge
 
-- **Challenge ID:**
-- **Khoảng thời gian điều tra:**
-- **Triệu chứng từ metrics:**
-- **Log line và correlation ID liên quan:**
-- **Trace ID và span gây ảnh hưởng:**
-- **Root cause:**
-- **Fix action:**
+- **Challenge ID:** day13-k4-l3a-monitoring-llmops-v1
+- **Khoảng thời gian điều tra:** 2026-09-29 17:20:00 - 17:25:00 (UTC 10:20:00 - 10:25:00)
+- **Triệu chứng từ metrics:** Trên Dashboard tại Panel 1 (Latency percentiles & TTFT), chỉ số độ trễ P95 tăng vọt từ ~208ms lên 2867.8ms (vượt ngưỡng cảnh báo 2000ms của challenge). Trong khi đó, TTFT P95 vẫn duy trì rất thấp ở mức 53.8ms, chứng tỏ bản thân mô hình LLM không bị trễ thời gian sinh token đầu tiên mà độ trễ nằm ở các bước xử lý dữ liệu trước LLM.
+- **Log line và correlation ID liên quan:** Lọc log trong `data/logs.jsonl` tại thời điểm sự cố xác định request bất thường có `correlation_id: req-76bb8208`. Dòng log `response_sent`:
+  `{"service": "api", "latency_ms": 3727, "ttft_ms": 50, "tokens_in": 34, "tokens_out": 85, "cost_usd": 0.001377, "quality_score": 0.9, "tool_name": "retrieval", "tool_success": true, "payload": {"answer_preview": "Starter answer. You should improve this output logic and add better quality chec..."}, "event": "response_sent", "session_id": "k4-l3a-challenge-s02", "user_id_hash": "aae0b94055a9", "feature": "monitoring", "env": "dev", "model": "claude-sonnet-4-5", "correlation_id": "req-76bb8208", "level": "info", "ts": "2026-09-29T10:21:02.444751Z"}`. Độ trễ ghi nhận lên tới 3727ms.
+- **Trace ID và span gây ảnh hưởng:** Trace ID: `b4b42f617c6e861e38bd5292be297f13` (khớp chính xác thời gian `2026-09-29 10:21:02.444 UTC` với log của `req-76bb8208`). Trong cây waterfall của trace này, span gây ảnh hưởng chính là child observation `retrieve` (loại `retriever`) kéo dài **2501ms** (từ `10:20:58.716` đến `10:21:01.217`), chiếm hơn 95% tổng thời gian xử lý, trong khi span `generation` chỉ mất **153ms**.
+- **Root cause:** Thành phần Retrieval (RAG / Vector search) gặp sự cố tắc nghẽn (`rag_slow`), dẫn đến bước tra cứu ngữ cảnh mất hơn 2.5 giây, làm kéo sập tail latency của toàn bộ hệ thống.
+- **Fix action:** Tắt sự cố bằng lệnh `python scripts/inject_incident.py --disable`. Trong môi trường sản xuất thực tế: kiểm tra kết nối mạng tới Vector DB cluster, kiểm tra tình trạng tải CPU/Memory của vector search nodes, mở rộng replica cho vector index và tối ưu tham số tìm kiếm top-k.
 - **Preventive measure:**
+  1. Cấu hình timeout nghiêm ngặt cho bước retrieval (ví dụ `timeout = 1000ms`), nếu vector store phản hồi quá 1 giây thì tự động kích hoạt fallback sang tìm kiếm từ khóa (lexical search) hoặc câu trả lời mặc định an toàn.
+  2. Bổ sung semantic cache cho các embedding và kết quả retrieval phổ biến để giảm tải trực tiếp cho vector database.
+  3. Cấu hình alert symptom-based `HighLatencyP95` (P1) gửi cảnh báo Slack tức thời cho on-call engineer khi Latency P95 vượt 3000ms kéo dài trên 5 phút.
 
 ## 8. Giải thích và tự đánh giá
 
-- **Một quyết định kỹ thuật quan trọng và lý do:**
-- **Một lỗi/blocker đã gặp:**
-- **Cách tìm nguyên nhân và xử lý:**
+- **Một quyết định kỹ thuật quan trọng và lý do:** Quyết định đặt processor `scrub_event` trong pipeline của structlog ngay TRƯỚC `JsonlFileProcessor()` và `JSONRenderer()`, đồng thời triển khai cơ chế làm sạch đệ quy duyệt qua toàn bộ dictionary/list trong `event_dict`. Lý do: Áp dụng triệt để nguyên tắc bảo mật Zero Trust cho dữ liệu nhạy cảm — bảo đảm mọi dữ liệu trước khi được serialize sang chuỗi JSON hoặc ghi xuống đĩa (`data/logs.jsonl`) đều đã bị che giấu PII 100%, triệt tiêu hoàn toàn rủi ro rò rỉ thông tin người dùng ra log aggregator hoặc bên thứ ba.
+- **Một lỗi/blocker đã gặp:** Khi chạy load test với `--concurrency 5` trong lúc kích hoạt sự cố `rag_slow`, hàm `retrieve()` sử dụng `time.sleep(2.5)` đồng bộ gây blocking trên luồng xử lý của FastAPI, dẫn đến các request đồng thời bị xếp hàng chờ trong hàng đợi (queue delay), khiến client đo được độ trễ tổng thể lên tới hơn 16 giây.
+- **Cách tìm nguyên nhân và xử lý:** So sánh giữa client latency (>16s), server log `latency_ms: 3727` và trace span `retrieve: 2500ms`. Sự chênh lệch này chỉ ra hiện tượng thread pool bị nghẽn do blocking I/O. Hướng xử lý: Trong môi trường production thực tế, toàn bộ tác vụ I/O mạng hoặc truy xuất database phải được viết bất đồng bộ (`async def retrieve` với async HTTP client hoặc đưa vào worker pool riêng) để không làm nghẽn event loop chính của web service.
 - **Cách hiểu luồng Metrics → Logs → Traces:**
+  1. *Metrics (Triệu chứng diện rộng):* Là radar phát hiện bất thường và khung thời gian xảy ra sự cố (Dashboard cảnh báo Latency P95 tăng vọt từ 208ms lên >2800ms vào lúc 17:21).
+  2. *Logs (Request bị ảnh hưởng):* Sử dụng khung giờ từ metrics để lọc file log, trích xuất mã định danh tương quan `correlation_id` của request lỗi/chậm (tìm ra `req-76bb8208` bị chậm 3727ms).
+  3. *Traces (Nguyên nhân gốc rễ):* Dùng chính `correlation_id` đó để tra cứu trace waterfall trên Langfuse, bóc tách từng span con để chỉ điểm chính xác thành phần gây lỗi (span `retrieve` kéo dài 2.5s do sự cố RAG).
 - **Vai trò của prompt version, token/cost, SLO hoặc rollback trong vận hành LLM:**
-- **Điều quan trọng nhất đã học:**
-- **Hạn chế hoặc phần chưa hoàn thành, nếu có:**
+  - *Prompt Versioning & Rollback:* Quản lý prompt như mã nguồn phiên bản, cho phép thử nghiệm phiên bản mới (`candidate`) và rollback tức thì về bản ổn định (`production`/`baseline`) ngay trên giao diện quản trị khi phát hiện lỗi định dạng hoặc suy giảm chất lượng mà không phải build/deploy lại container.
+  - *Token & Cost Guardrails:* Mô hình LLM tiêu tốn chi phí theo lượng token tiêu thụ. Việc giám sát token/chi phí theo thời gian thực và đặt threshold cảnh báo giúp ngăn chặn sự cố cạn kiệt ngân sách hoặc vòng lặp vô tận (infinite generation loop).
+  - *SLO & Error Budget:* Định lượng rõ ràng cam kết chất lượng dịch vụ (99.5% request dưới 3s), tạo căn cứ kỹ thuật minh bạch để quyết định khi nào được triển khai tính năng mới và khi nào phải ưu tiên vá lỗi độ ổn định hệ thống.
+- **Điều quan trọng nhất đã học:** Nắm vững phương pháp luận Observability hiện đại cho LLM: Hiểu rõ structured logging không thay thế tracing, và metrics không thay thế logs. Sự kết hợp cả 3 trụ cột liên kết qua `correlation_id` là chìa khóa duy nhất để tháo gỡ bài toán "hộp đen" của các ứng dụng AI.
+- **Hạn chế hoặc phần chưa hoàn thành, nếu có:** Bài lab hiện triển khai với FakeLLM và in-memory mock corpus thay vì cụm vector database phân tán thực tế (như Qdrant/Pinecone/Milvus) và LLM API thương mại bên ngoài.
 
 ## 9. Checklist trước khi nộp
 
