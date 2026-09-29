@@ -4,13 +4,13 @@
 
 ## 1. Thông tin học viên
 
-- **Họ và tên:**
-- **MSSV:**
+- **Họ và tên:** Đặng Hữu Cương
+- **MSSV:** 2A202602572
 - **Lớp:** K4-L3A
-- **Repository URL:**
+- **Repository URL:** https://github.com/y0sh1da-available/K4-L3-DAY13-DangHuuCuong-2A202602572-Monitoring-LLMOps.git
 - **Commit SHA cuối:**
 - **Challenge ID:**
-- **Tên project Langfuse cá nhân:** `day13-k4-l3a-<MSSV>`
+- **Tên project Langfuse cá nhân:** `day13-k4-l3a-2A202602572`
 
 ## 2. Evidence index
 
@@ -37,13 +37,13 @@
 
 | Nội dung | Baseline | Kết quả cuối | Nhận xét |
 |---|---|---|---|
-| `validate_logs.py` | | | |
-| `validate_dashboard.py` | | | |
-| `pytest` | | | |
-| Số traces hợp lệ | | | |
-| Số PII leak | | | |
-| Latency P95 / TTFT P95 | | | |
-| Retrieval success rate | | | |
+| `validate_logs.py` | 30/100 | | Thiếu required fields, correlation ID, metadata enrichment (đúng dự kiến baseline) |
+| `validate_dashboard.py` | 6/6 panel | | Contract schema hợp lệ |
+| `pytest` | 22 passed | | Toàn bộ unit tests khởi đầu pass |
+| Số traces hợp lệ | 0 | | Chưa triển khai child observations cho tracing |
+| Số PII leak | 0 | | Chưa phát hiện leak ở baseline |
+| Latency P95 / TTFT P95 | ~516.4ms / N/A | | Chưa có trường ttft_ms và tail latency chuẩn |
+| Retrieval success rate | 100% | | Chưa có incident |
 
 ## 4. Logging và PII
 
